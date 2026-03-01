@@ -32,4 +32,82 @@ workflows:
           - condition: $statusCode == 200
         outputs:
           allRepos: $response.body
+      - stepId: checkRecentIssueActivity
+        operationId: github-api.issues/list-for-repo
+        description: Check if the first repository has any issue activity in the last 12 months
+        parameters:
+          - name: owner
+            in: path
+            value: $steps.getUserRepos.outputs.allRepos[0].owner.login
+          - name: repo
+            in: path
+            value: $steps.getUserRepos.outputs.allRepos[0].name
+          - name: state
+            in: query
+            value: all
+          - name: since
+            in: query
+            value: "2025-03-01T00:00:00Z"
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          recentIssues: $response.body
+      - stepId: checkRecentCommits
+        operationId: github-api.repos/list-commits
+        description: Check if the first repository has any commits in the last 12 months
+        parameters:
+          - name: owner
+            in: path
+            value: $steps.getUserRepos.outputs.allRepos[0].owner.login
+          - name: repo
+            in: path
+            value: $steps.getUserRepos.outputs.allRepos[0].name
+          - name: since
+            in: query
+            value: "2025-03-01T00:00:00Z"
+          - name: per_page
+            in: query
+            value: 1
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          recentCommits: $response.body
+      - stepId: checkRecentPullRequests
+        operationId: github-api.search/issues-and-pull-requests
+        description: Search for pull requests with activity in the last 12 months using date filtering
+        parameters:
+          - name: q
+            in: query
+            value: repo:$steps.getUserRepos.outputs.allRepos[0].full_name is:pr updated:>2025-03-01
+          - name: per_page
+            in: query
+            value: 1
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          pullRequestSearchResults: $response.body
+      - stepId: checkRecentReleases
+        operationId: github-api.repos/list-releases
+        description: |
+          Fetch all releases for the repository. Note: This endpoint does not support
+          date filtering via parameters. The executor must filter the results by checking
+          if any release has published_at or created_at > 2025-03-01T00:00:00Z.
+          If no releases meet this criteria, the repository has no release activity
+          in the last 12 months.
+        parameters:
+          - name: owner
+            in: path
+            value: $steps.getUserRepos.outputs.allRepos[0].owner.login
+          - name: repo
+            in: path
+            value: $steps.getUserRepos.outputs.allRepos[0].name
+          - name: per_page
+            in: query
+            value: 100
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          allReleases: $response.body
+          firstReleasePublishedAt: $response.body[0].published_at
+          firstReleaseCreatedAt: $response.body[0].created_at
 
