@@ -24,7 +24,7 @@ workflows:
     description: Lists all repos for the authenticated user, sorted by last push date to identify stale repositories
     steps:
       - stepId: getUserRepos
-        operationId: github-api.repos/list-for-authenticated-user
+        operationId: repos/list-for-authenticated-user
         description: Fetch all user repositories sorted by activity (oldest first)
         parameters:
           - name: sort
@@ -44,7 +44,7 @@ workflows:
         outputs:
           allRepos: $response.body
       - stepId: checkRecentIssueActivity
-        operationId: github-api.issues/list-for-repo
+        operationId: issues/list-for-repo
         description: Check if the first repository has any issue activity in the last 12 months. If activity is found, workflow ends without archiving.
         parameters:
           - name: owner
@@ -68,10 +68,10 @@ workflows:
               - context: $response.body
                 type: jsonpath
                 condition: $.length > 0
-        outputs:
-          recentIssues: $response.body
+        # outputs:
+        #   recentIssues: $response.body
       - stepId: checkRecentCommits
-        operationId: github-api.repos/list-commits
+        operationId: repos/list-commits
         description: Check if the first repository has any commits in the last 12 months. If commits are found, workflow ends without archiving.
         parameters:
           - name: owner
@@ -95,10 +95,10 @@ workflows:
               - context: $response.body
                 type: jsonpath
                 condition: $.length > 0
-        outputs:
-          recentCommits: $response.body
+        # outputs:
+        #   recentCommits: $response.body
       - stepId: checkRecentPullRequests
-        operationId: github-api.search/issues-and-pull-requests
+        operationId: search/issues-and-pull-requests
         description: Search for pull requests with activity in the last 12 months using date filtering. If PRs are found, workflow ends without archiving.
         parameters:
           - name: q
@@ -119,7 +119,7 @@ workflows:
         outputs:
           pullRequestSearchResults: $response.body
       - stepId: checkRecentReleases
-        operationId: github-api.repos/list-releases
+        operationId: repos/list-releases
         description: |
           Fetch releases and check for activity in the last 12 months.
           Uses JSONPath to check if the most recent release (first in array)
@@ -144,35 +144,35 @@ workflows:
               - context: $response.body
                 type: jsonpath
                 condition: $[0].published_at > '2025-03-01'
-        outputs:
-          allReleases: $response.body
-          firstReleasePublishedAt: $response.body[0].published_at
-          firstReleaseCreatedAt: $response.body[0].created_at
-      - stepId: archiveStaleRepository
-        operationId: github-api.repos/update
-        description: |
-          Archive the repository if there was NO activity in the last 12 months.
-          This step should only execute if:
-          - recentIssues array is empty (length == 0)
-          - recentCommits array is empty (length == 0)
-          - pullRequestSearchResults.total_count == 0
-          - allReleases array is empty OR all releases are older than 12 months
+        # outputs:
+        #   allReleases: $response.body
+        #   firstReleasePublishedAt: $response.body[0].published_at
+        #   firstReleaseCreatedAt: $response.body[0].created_at
+      # - stepId: archiveStaleRepository
+      #   operationId: repos/update
+      #   description: |
+      #     Archive the repository if there was NO activity in the last 12 months.
+      #     This step should only execute if:
+      #     - recentIssues array is empty (length == 0)
+      #     - recentCommits array is empty (length == 0)
+      #     - pullRequestSearchResults.total_count == 0
+      #     - allReleases array is empty OR all releases are older than 12 months
 
-          Note: The executor must evaluate these conditions before executing this step.
-          If any activity was found, skip this step.
-        parameters:
-          - name: owner
-            in: path
-            value: $steps.getUserRepos.outputs.allRepos[0].owner.login
-          - name: repo
-            in: path
-            value: $steps.getUserRepos.outputs.allRepos[0].name
-        requestBody:
-          contentType: application/json
-          payload:
-            archived: true
-        successCriteria:
-          - condition: $statusCode == 200
-        outputs:
-          archivedRepo: $response.body
+      #     Note: The executor must evaluate these conditions before executing this step.
+      #     If any activity was found, skip this step.
+      #   parameters:
+      #     - name: owner
+      #       in: path
+      #       value: $steps.getUserRepos.outputs.allRepos[0].owner.login
+      #     - name: repo
+      #       in: path
+      #       value: $steps.getUserRepos.outputs.allRepos[0].name
+      #   requestBody:
+      #     contentType: application/json
+      #     payload:
+      #       archived: true
+      #   successCriteria:
+      #     - condition: $statusCode == 200
+      #   outputs:
+      #     archivedRepo: $response.body
 

@@ -6,7 +6,9 @@
     "serve": "npx http-server -p 8080 --cors",
     "view:arazzo": "npx http-server -p 8080 --cors & sleep 2 && npx @jentic/arazzo-ui http://localhost:8080/gh-archive-stale-repos.yaml",
     "validate": "npx @jentic/arazzo-validator gh-archive-stale-repos.yaml",
-    "stop": "pkill -f 'http-server -p 8080' || true"
+    "stop": "pkill -f 'http-server -p 8080' || true",
+    "runner:show-env-mappings": "uvx arazzo-runner show-env-mappings --openapi-path api.github.com.2022-11-28.openapi.yaml",
+    "runner:execute": "bash -c 'source .env && uvx arazzo-runner execute-workflow gh-archive-stale-repos.yaml --workflow-id listUserRepos'"
   },
   "keywords": ["arazzo", "openapi", "github"],
   "author": "",
