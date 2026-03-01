@@ -1,0 +1,14 @@
+{
+  "name": "talk-rest-api-for-ai",
+  "version": "1.0.0",
+  "description": "GitHub workflow for archiving stale repos",
+  "scripts": {
+    "serve": "npx http-server -p 8080 --cors",
+    "view:arazzo": "npx http-server -p 8080 --cors & sleep 2 && npx @jentic/arazzo-ui http://localhost:8080/gh-archive-stale-repos.yaml",
+    "validate": "npx @jentic/arazzo-validator gh-archive-stale-repos.yaml",
+    "stop": "pkill -f 'http-server -p 8080' || true"
+  },
+  "keywords": ["arazzo", "openapi", "github"],
+  "author": "",
+  "license": "ISC"
+}
