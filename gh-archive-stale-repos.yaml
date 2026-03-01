@@ -1,0 +1,35 @@
+arazzo: "1.0.1"
+info:
+  title: "Archive stale GitHub repos"
+  version: "1.0.0"
+  description: "Archives all repos with no activeties (issues or commits) during the last 12 Month."
+sourceDescriptions:
+  - name: github-api
+    type: openapi
+    url: ./api.github.com.yaml
+workflows:
+  - workflowId: listUserRepos
+    summary: List all user repositories
+    description: Lists all repos for the authenticated user, sorted by last push date to identify stale repositories
+    steps:
+      - stepId: getUserRepos
+        operationId: github-api.repos/list-for-authenticated-user
+        description: Fetch all user repositories sorted by activity (oldest first)
+        parameters:
+          - name: sort
+            in: query
+            value: pushed
+          - name: direction
+            in: query
+            value: asc
+          - name: type
+            in: query
+            value: owner
+          - name: per_page
+            in: query
+            value: 100
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          allRepos: $response.body
+
