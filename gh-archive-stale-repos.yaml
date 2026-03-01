@@ -3,6 +3,17 @@ info:
   title: "Archive stale GitHub repos"
   version: "1.0.0"
   description: "Archives all repos with no activeties (issues or commits) during the last 12 Month."
+x-activity-threshold:
+  date: "2025-03-01T00:00:00Z"
+  description: "Repositories with no activity after this date are considered stale"
+  months: 12
+x-validation-notes: |
+  This workflow uses JSONPath RFC 9535 for date comparisons.
+  ISO 8601 date strings are compared lexicographically, which works correctly
+  for standard ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ).
+
+  Extension fields (x-) are used to document workflow configuration that
+  may be used by custom tooling or executors.
 sourceDescriptions:
   - name: github-api
     type: openapi
@@ -34,7 +45,7 @@ workflows:
           allRepos: $response.body
       - stepId: checkRecentIssueActivity
         operationId: github-api.issues/list-for-repo
-        description: Check if the first repository has any issue activity in the last 12 months
+        description: Check if the first repository has any issue activity in the last 12 months. If activity is found, workflow ends without archiving.
         parameters:
           - name: owner
             in: path
@@ -50,11 +61,18 @@ workflows:
             value: "2025-03-01T00:00:00Z"
         successCriteria:
           - condition: $statusCode == 200
+        onSuccess:
+          - name: skipArchiveIfIssuesFound
+            type: end
+            criteria:
+              - context: $response.body
+                type: jsonpath
+                condition: $.length > 0
         outputs:
           recentIssues: $response.body
       - stepId: checkRecentCommits
         operationId: github-api.repos/list-commits
-        description: Check if the first repository has any commits in the last 12 months
+        description: Check if the first repository has any commits in the last 12 months. If commits are found, workflow ends without archiving.
         parameters:
           - name: owner
             in: path
@@ -70,11 +88,18 @@ workflows:
             value: 1
         successCriteria:
           - condition: $statusCode == 200
+        onSuccess:
+          - name: skipArchiveIfCommitsFound
+            type: end
+            criteria:
+              - context: $response.body
+                type: jsonpath
+                condition: $.length > 0
         outputs:
           recentCommits: $response.body
       - stepId: checkRecentPullRequests
         operationId: github-api.search/issues-and-pull-requests
-        description: Search for pull requests with activity in the last 12 months using date filtering
+        description: Search for pull requests with activity in the last 12 months using date filtering. If PRs are found, workflow ends without archiving.
         parameters:
           - name: q
             in: query
@@ -84,16 +109,22 @@ workflows:
             value: 1
         successCriteria:
           - condition: $statusCode == 200
+        onSuccess:
+          - name: skipArchiveIfPullRequestsFound
+            type: end
+            criteria:
+              - context: $response.body
+                type: jsonpath
+                condition: $.total_count > 0
         outputs:
           pullRequestSearchResults: $response.body
       - stepId: checkRecentReleases
         operationId: github-api.repos/list-releases
         description: |
-          Fetch all releases for the repository. Note: This endpoint does not support
-          date filtering via parameters. The executor must filter the results by checking
-          if any release has published_at or created_at > 2025-03-01T00:00:00Z.
-          If no releases meet this criteria, the repository has no release activity
-          in the last 12 months.
+          Fetch releases and check for activity in the last 12 months.
+          Uses JSONPath to check if the most recent release (first in array)
+          has a published_at date greater than 2025-03-01.
+          ISO 8601 date strings are compared lexicographically per RFC 9535.
         parameters:
           - name: owner
             in: path
@@ -106,8 +137,42 @@ workflows:
             value: 100
         successCriteria:
           - condition: $statusCode == 200
+        onSuccess:
+          - name: skipArchiveIfRecentRelease
+            type: end
+            criteria:
+              - context: $response.body
+                type: jsonpath
+                condition: $[0].published_at > '2025-03-01'
         outputs:
           allReleases: $response.body
           firstReleasePublishedAt: $response.body[0].published_at
           firstReleaseCreatedAt: $response.body[0].created_at
+      - stepId: archiveStaleRepository
+        operationId: github-api.repos/update
+        description: |
+          Archive the repository if there was NO activity in the last 12 months.
+          This step should only execute if:
+          - recentIssues array is empty (length == 0)
+          - recentCommits array is empty (length == 0)
+          - pullRequestSearchResults.total_count == 0
+          - allReleases array is empty OR all releases are older than 12 months
+
+          Note: The executor must evaluate these conditions before executing this step.
+          If any activity was found, skip this step.
+        parameters:
+          - name: owner
+            in: path
+            value: $steps.getUserRepos.outputs.allRepos[0].owner.login
+          - name: repo
+            in: path
+            value: $steps.getUserRepos.outputs.allRepos[0].name
+        requestBody:
+          contentType: application/json
+          payload:
+            archived: true
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          archivedRepo: $response.body
 
