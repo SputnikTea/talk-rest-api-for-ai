@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:swagger.io)",
+      "WebFetch(domain:spec.openapis.org)"
+    ]
+  }
+}
