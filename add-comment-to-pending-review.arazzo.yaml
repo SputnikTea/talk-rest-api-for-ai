@@ -1,0 +1,364 @@
+arazzo: "1.0.1"
+info:
+  title: "Add comment to pending pull request review (REST API)"
+  version: "1.0.0"
+  description: |
+    REST API workflows that replicate the GitHub MCP Server's
+    `add_comment_to_pending_review` tool, which normally uses 3 sequential
+    GraphQL calls. Because the REST API has no endpoint to append a comment
+    to an existing pending review, two alternative workflows are provided:
+
+    - **Alternative A** (createPendingReviewWithComment):
+      Creates a new pending review with the comment included.
+      Only works when no pending review exists yet.
+
+    - **Alternative B** (addCommentByRecreatePendingReview):
+      Reads the existing pending review and its comments, deletes it,
+      then recreates it with all original comments plus the new one.
+      Fragile workaround — risk of data loss if the final POST fails.
+
+x-design-notes: |
+  The GitHub REST API (v2022-11-28) has no endpoint equivalent to the
+  GraphQL mutation `addPullRequestReviewThread`. The `pull_request_review_id`
+  field exists only as a response field, never as an input parameter.
+  See add_comment_to_pending_review_rest_analyse.md for the full analysis.
+
+  Client-side filtering is required in both workflows because
+  `GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews` does not
+  support server-side filtering by author or state.
+
+sourceDescriptions:
+  - name: github-api
+    type: openapi
+    url: ./api.github.com.2022-11-28.openapi.yaml
+
+workflows:
+  # ──────────────────────────────────────────────────────────────────
+  # Alternative A — Create a NEW pending review with the comment
+  # ──────────────────────────────────────────────────────────────────
+  - workflowId: createPendingReviewWithComment
+    summary: Create a new pending review containing the comment
+    description: |
+      Use this workflow when no pending review exists yet for the
+      authenticated user on the target pull request.
+
+      Steps:
+        1. Get the authenticated user's login.
+        2. List all reviews on the PR; verify none is PENDING for this user.
+        3. Create a new pending review with the comment in the comments array.
+    inputs:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner (user or organisation)
+        repo:
+          type: string
+          description: Repository name
+        pull_number:
+          type: integer
+          description: Pull request number
+        path:
+          type: string
+          description: "File path relative to the repo root (e.g. src/main.ts)"
+        body:
+          type: string
+          description: The comment text
+        line:
+          type: integer
+          description: "Line number in the diff to place the comment on"
+        side:
+          type: string
+          description: "Side of the diff: LEFT or RIGHT"
+        start_line:
+          type: integer
+          description: "Start line for a multi-line comment (optional)"
+        start_side:
+          type: string
+          description: "Start side for a multi-line comment (optional)"
+      required:
+        - owner
+        - repo
+        - pull_number
+        - path
+        - body
+    steps:
+      # Step 1 — Who am I?
+      - stepId: getAuthenticatedUser
+        operationId: users/get-authenticated
+        description: Fetch the login of the currently authenticated user.
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          viewerLogin: $response.body.login
+
+      # Step 2 — Any pending review already?
+      - stepId: listReviews
+        operationId: pulls/list-reviews
+        description: |
+          List all reviews on the pull request.
+
+          x-executor-requirement: The executor MUST client-side filter
+          the response array for entries where
+            user.login == $steps.getAuthenticatedUser.outputs.viewerLogin
+            AND state == "PENDING"
+          If a matching pending review is found, this workflow MUST abort.
+          Use addCommentByRecreatePendingReview instead.
+          If no pending review exists, proceed to the next step.
+        parameters:
+          - name: owner
+            in: path
+            value: $inputs.owner
+          - name: repo
+            in: path
+            value: $inputs.repo
+          - name: pull_number
+            in: path
+            value: $inputs.pull_number
+          - name: per_page
+            in: query
+            value: 100
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          reviews: $response.body
+
+      # Step 3 — Create a new pending review with the comment
+      - stepId: createReviewWithComment
+        operationId: pulls/create-review
+        description: |
+          Create a new pending review (event omitted = PENDING state) with
+          the desired comment included in the comments array.
+        parameters:
+          - name: owner
+            in: path
+            value: $inputs.owner
+          - name: repo
+            in: path
+            value: $inputs.repo
+          - name: pull_number
+            in: path
+            value: $inputs.pull_number
+        requestBody:
+          contentType: application/json
+          payload:
+            comments:
+              - path: $inputs.path
+                body: $inputs.body
+                line: $inputs.line
+                side: $inputs.side
+                start_line: $inputs.start_line
+                start_side: $inputs.start_side
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          createdReview: $response.body
+
+  # ──────────────────────────────────────────────────────────────────
+  # Alternative B — Delete existing pending review and recreate it
+  # ──────────────────────────────────────────────────────────────────
+  - workflowId: addCommentByRecreatePendingReview
+    summary: Add a comment to an existing pending review by deleting and recreating it
+    description: |
+      Use this workflow when a pending review already exists for the
+      authenticated user on the target pull request.
+
+      Because the REST API cannot append a comment to an existing pending
+      review, this workflow reads all existing comments, deletes the
+      pending review, and recreates it with all original comments plus
+      the new one.
+
+      WARNING: This is a destructive workaround.
+        - If the final POST fails, the original review and its comments
+          are lost.
+        - All comment IDs change (external references break).
+        - Race conditions between DELETE and POST are possible.
+
+      Steps:
+        1. Get the authenticated user's login.
+        2. List all reviews on the PR; find the PENDING one for this user.
+        3. Read all existing comments of the pending review.
+        4. Delete the pending review.
+        5. Recreate the pending review with all old comments plus the new one.
+    inputs:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner (user or organisation)
+        repo:
+          type: string
+          description: Repository name
+        pull_number:
+          type: integer
+          description: Pull request number
+        path:
+          type: string
+          description: "File path relative to the repo root (e.g. src/main.ts)"
+        body:
+          type: string
+          description: The comment text
+        line:
+          type: integer
+          description: "Line number in the diff to place the comment on"
+        side:
+          type: string
+          description: "Side of the diff: LEFT or RIGHT"
+        start_line:
+          type: integer
+          description: "Start line for a multi-line comment (optional)"
+        start_side:
+          type: string
+          description: "Start side for a multi-line comment (optional)"
+      required:
+        - owner
+        - repo
+        - pull_number
+        - path
+        - body
+    steps:
+      # Step 1 — Who am I?
+      - stepId: getAuthenticatedUser
+        operationId: users/get-authenticated
+        description: Fetch the login of the currently authenticated user.
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          viewerLogin: $response.body.login
+
+      # Step 2 — Find the existing pending review
+      - stepId: listReviews
+        operationId: pulls/list-reviews
+        description: |
+          List all reviews on the pull request.
+
+          x-executor-requirement: The executor MUST client-side filter
+          the response array for the entry where
+            user.login == $steps.getAuthenticatedUser.outputs.viewerLogin
+            AND state == "PENDING"
+          and extract its `id` and `body` fields into the outputs
+          pendingReviewId and pendingReviewBody respectively.
+          If no such entry exists, this workflow MUST abort.
+          Use createPendingReviewWithComment instead.
+        parameters:
+          - name: owner
+            in: path
+            value: $inputs.owner
+          - name: repo
+            in: path
+            value: $inputs.repo
+          - name: pull_number
+            in: path
+            value: $inputs.pull_number
+          - name: per_page
+            in: query
+            value: 100
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          # The executor resolves these by filtering $response.body
+          # for the entry matching user.login + state == "PENDING".
+          # Arazzo runtime expressions cannot express array filtering,
+          # so these are set to the full response body and the executor
+          # must extract the correct values per the description above.
+          pendingReviewId: $response.body
+          pendingReviewBody: $response.body
+
+      # Step 3 — Read all existing comments of the pending review
+      - stepId: listReviewComments
+        operationId: pulls/list-comments-for-review
+        description: |
+          Retrieve all comments from the existing pending review.
+          These must be preserved when recreating the review.
+          Note: pagination may be needed for reviews with many comments.
+        parameters:
+          - name: owner
+            in: path
+            value: $inputs.owner
+          - name: repo
+            in: path
+            value: $inputs.repo
+          - name: pull_number
+            in: path
+            value: $inputs.pull_number
+          - name: review_id
+            in: path
+            value: $steps.listReviews.outputs.pendingReviewId
+          - name: per_page
+            in: query
+            value: 100
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          existingComments: $response.body
+
+      # Step 4 — Delete the pending review
+      - stepId: deletePendingReview
+        operationId: pulls/delete-pending-review
+        description: |
+          Delete the existing pending review. Only reviews in PENDING state
+          can be deleted. After this step the review and all its comments
+          are gone — the next step MUST succeed to avoid data loss.
+        parameters:
+          - name: owner
+            in: path
+            value: $inputs.owner
+          - name: repo
+            in: path
+            value: $inputs.repo
+          - name: pull_number
+            in: path
+            value: $inputs.pull_number
+          - name: review_id
+            in: path
+            value: $steps.listReviews.outputs.pendingReviewId
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          deletedReview: $response.body
+
+      # Step 5 — Recreate the pending review with all comments
+      - stepId: recreateReviewWithAllComments
+        operationId: pulls/create-review
+        description: |
+          Recreate the pending review with the original body, all
+          previously existing comments, and the new comment appended.
+
+          x-executor-requirement: The executor MUST build the `comments`
+          array in the request body by:
+            1. Mapping each item from
+               $steps.listReviewComments.outputs.existingComments
+               to the create-review comment schema, extracting the fields:
+               path, body, line, side, start_line, start_side.
+            2. Appending one additional comment object constructed from
+               the workflow inputs: $inputs.path, $inputs.body,
+               $inputs.line, $inputs.side, $inputs.start_line,
+               $inputs.start_side.
+
+          The `body` field of the review is restored from
+          $steps.listReviews.outputs.pendingReviewBody.
+
+          Note: All comment IDs will change. Original review metadata
+          (created_at, etc.) is lost.
+        parameters:
+          - name: owner
+            in: path
+            value: $inputs.owner
+          - name: repo
+            in: path
+            value: $inputs.repo
+          - name: pull_number
+            in: path
+            value: $inputs.pull_number
+        requestBody:
+          contentType: application/json
+          payload:
+            body: $steps.listReviews.outputs.pendingReviewBody
+            # The comments array below is a placeholder.
+            # The executor MUST construct the actual array as described
+            # in the step description (existing comments + new comment).
+            comments: $steps.listReviewComments.outputs.existingComments
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          recreatedReview: $response.body
