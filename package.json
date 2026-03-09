@@ -1,6 +1,9 @@
 {
   "name": "talk-rest-api-for-ai",
   "packageManager": "yarn@4.11.0",
+  "scripts": {
+"lint": "spectral lint --fail-severity=info"
+  },
   "dependencies": {
     "@stoplight/spectral-cli": "^6.15.0"
   }

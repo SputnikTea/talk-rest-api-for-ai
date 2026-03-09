@@ -1,0 +1,160 @@
+arazzo: "1.0.1"
+info:
+  title: "Push files to a GitHub repository"
+  summary: "5-step Git Data API workflow that commits and pushes files to an existing branch"
+  version: "1.0.0"
+  description: >
+    Pushes one or more files to a branch in a GitHub repository.
+    Reproduces the MCP tool `push_files` (Path A: branch exists) as a
+    5-step REST workflow using the Git Data API.
+    File contents are passed inline in the tree entry — no separate
+    blob creation per file is needed.
+sourceDescriptions:
+  - name: github-api
+    type: openapi
+    url: ./api.github.com.2022-11-28.openapi.yaml
+workflows:
+  - workflowId: pushFiles
+    summary: Push files to an existing branch via the Git Data API
+    description: >
+      Creates a new commit containing the supplied files on an existing branch.
+      Steps: resolve branch ref → get parent commit → create tree → create
+      commit → update branch ref.  Each step feeds its output into the next.
+    inputs:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner
+        repo:
+          type: string
+          description: Repository name
+        branch:
+          type: string
+          description: Target branch name
+        commitMessage:
+          type: string
+          description: Commit message
+        files:
+          type: array
+          description: "Files to push (each entry: path + content)"
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              content:
+                type: string
+      required:
+        - owner
+        - repo
+        - branch
+        - commitMessage
+        - files
+    steps:
+      - stepId: getBranchRef
+        operationId: git/get-ref
+        description: Resolve the current HEAD SHA of the target branch
+        parameters:
+          - name: owner
+            in: path
+            value: $inputs.owner
+          - name: repo
+            in: path
+            value: $inputs.repo
+          - name: ref
+            in: path
+            value: heads/$inputs.branch
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          parentCommitSha: $response.body.object.sha
+
+      - stepId: getParentCommit
+        operationId: git/get-commit
+        description: Get the parent commit to retrieve its tree SHA
+        parameters:
+          - name: owner
+            in: path
+            value: $inputs.owner
+          - name: repo
+            in: path
+            value: $inputs.repo
+          - name: commit_sha
+            in: path
+            value: $steps.getBranchRef.outputs.parentCommitSha
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          baseTreeSha: $response.body.tree.sha
+
+      - stepId: createTree
+        operationId: git/create-tree
+        description: >
+          Create a new tree with the file contents.
+          Files are passed inline via the content field — the API creates
+          blobs internally, so no separate blob-creation step is needed.
+        parameters:
+          - name: owner
+            in: path
+            value: $inputs.owner
+          - name: repo
+            in: path
+            value: $inputs.repo
+        requestBody:
+          contentType: application/json
+          payload:
+            base_tree: $steps.getParentCommit.outputs.baseTreeSha
+            tree: $inputs.files
+        successCriteria:
+          - condition: $statusCode == 201
+        outputs:
+          newTreeSha: $response.body.sha
+
+      - stepId: createCommit
+        operationId: git/create-commit
+        description: Create a new commit pointing to the new tree
+        parameters:
+          - name: owner
+            in: path
+            value: $inputs.owner
+          - name: repo
+            in: path
+            value: $inputs.repo
+        requestBody:
+          contentType: application/json
+          payload:
+            message: $inputs.commitMessage
+            tree: $steps.createTree.outputs.newTreeSha
+            parents:
+              - $steps.getBranchRef.outputs.parentCommitSha
+        successCriteria:
+          - condition: $statusCode == 201
+        outputs:
+          newCommitSha: $response.body.sha
+
+      - stepId: updateBranchRef
+        operationId: git/update-ref
+        description: Fast-forward the branch ref to the new commit
+        parameters:
+          - name: owner
+            in: path
+            value: $inputs.owner
+          - name: repo
+            in: path
+            value: $inputs.repo
+          - name: ref
+            in: path
+            value: heads/$inputs.branch
+        requestBody:
+          contentType: application/json
+          payload:
+            sha: $steps.createCommit.outputs.newCommitSha
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          updatedRef: $response.body.ref
+          finalCommitSha: $response.body.object.sha
+    outputs:
+      ref: $steps.updateBranchRef.outputs.updatedRef
+      commitSha: $steps.updateBranchRef.outputs.finalCommitSha
