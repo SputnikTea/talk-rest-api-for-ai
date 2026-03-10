@@ -1,6 +1,7 @@
 arazzo: "1.0.1"
 info:
   title: "Add comment to pending pull request review (REST API)"
+  summary: "REST API workarounds for adding a comment to a pending PR review"
   version: "1.0.0"
   description: |
     REST API workflows that replicate the GitHub MCP Server's

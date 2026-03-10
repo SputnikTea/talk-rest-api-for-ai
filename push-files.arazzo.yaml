@@ -1,25 +1,46 @@
 arazzo: "1.0.1"
 info:
   title: "Push files to a GitHub repository"
-  summary: "5-step Git Data API workflow that commits and pushes files to an existing branch"
-  version: "1.0.0"
+  summary: "Git Data API workflow that commits and pushes files, creating the branch if needed"
+  version: "3.0.0"
   description: >
     Pushes one or more files to a branch in a GitHub repository.
-    Reproduces the MCP tool `push_files` (Path A: branch exists) as a
-    5-step REST workflow using the Git Data API.
+    Reproduces the MCP tool `push_files` as an Arazzo workflow covering
+    both Path A (branch exists) and Path B (branch not found / 404).
+    The shared commit-and-push logic (getParentCommit, createTree,
+    createCommit, updateBranchRef) is extracted into a reusable
+    `commitAndPush` workflow called by both paths.
     File contents are passed inline in the tree entry — no separate
     blob creation per file is needed.
+
 sourceDescriptions:
   - name: github-api
     type: openapi
     url: ./api.github.com.2022-11-28.openapi.yaml
+
+components:
+  parameters:
+    owner:
+      name: owner
+      in: path
+      value: $inputs.owner
+    repo:
+      name: repo
+      in: path
+      value: $inputs.repo
+
 workflows:
+  # ──────────────────────────────────────────────
+  # Main workflow — entry point
+  # ──────────────────────────────────────────────
   - workflowId: pushFiles
-    summary: Push files to an existing branch via the Git Data API
+    summary: Push files to a branch, creating it from the default branch if it does not exist
     description: >
-      Creates a new commit containing the supplied files on an existing branch.
-      Steps: resolve branch ref → get parent commit → create tree → create
-      commit → update branch ref.  Each step feeds its output into the next.
+      Tries to resolve the target branch ref (Path A).  If the branch does
+      not exist (404), delegates to the createBranchAndPushFiles workflow
+      which creates the branch from the repository default branch first
+      (Path B), then commits and pushes the files via the shared
+      commitAndPush workflow.
     inputs:
       type: object
       properties:
@@ -52,42 +73,232 @@ workflows:
         - commitMessage
         - files
     steps:
+      # ── Step 1: resolve target branch ──
       - stepId: getBranchRef
         operationId: git/get-ref
-        description: Resolve the current HEAD SHA of the target branch
+        description: >
+          Resolve the current HEAD SHA of the target branch.
+          If the branch does not exist (404), fall through to Path B
+          which creates it from the default branch.
         parameters:
-          - name: owner
-            in: path
-            value: $inputs.owner
-          - name: repo
-            in: path
-            value: $inputs.repo
+          - reference: $components.parameters.owner
+          - reference: $components.parameters.repo
           - name: ref
             in: path
             value: heads/$inputs.branch
         successCriteria:
           - condition: $statusCode == 200
+        onFailure:
+          - name: branchNotFound
+            type: goto
+            workflowId: createBranchAndPushFiles
+            criteria:
+              - condition: $statusCode == 404
         outputs:
           parentCommitSha: $response.body.object.sha
 
-      - stepId: getParentCommit
-        operationId: git/get-commit
-        description: Get the parent commit to retrieve its tree SHA
+      # ── Step 2: delegate to shared commit-and-push workflow ──
+      - stepId: commitAndPush
+        workflowId: commitAndPush
+        description: >
+          Commit and push the files using the resolved branch HEAD as parent.
         parameters:
           - name: owner
-            in: path
             value: $inputs.owner
           - name: repo
-            in: path
             value: $inputs.repo
+          - name: branch
+            value: $inputs.branch
+          - name: commitMessage
+            value: $inputs.commitMessage
+          - name: files
+            value: $inputs.files
+          - name: parentCommitSha
+            value: $steps.getBranchRef.outputs.parentCommitSha
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          ref: $outputs.ref
+          commitSha: $outputs.commitSha
+    outputs:
+      ref: $steps.commitAndPush.outputs.ref
+      commitSha: $steps.commitAndPush.outputs.commitSha
+
+  # ──────────────────────────────────────────────
+  # Path B: branch does not exist (404)
+  # ──────────────────────────────────────────────
+  - workflowId: createBranchAndPushFiles
+    summary: Create a new branch from the default branch, then push files
+    description: >
+      Path B of the push_files tool.  Called when the target branch does
+      not exist.  Resolves the repository default branch, creates a new
+      branch ref from it, then delegates to the shared commitAndPush
+      workflow for the actual commit and push.
+    inputs:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner
+        repo:
+          type: string
+          description: Repository name
+        branch:
+          type: string
+          description: Target branch name (to be created)
+        commitMessage:
+          type: string
+          description: Commit message
+        files:
+          type: array
+          description: "Files to push (each entry: path + content)"
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              content:
+                type: string
+      required:
+        - owner
+        - repo
+        - branch
+        - commitMessage
+        - files
+    steps:
+      # ── B1: get repo to find default branch name ──
+      - stepId: getRepo
+        operationId: repos/get
+        description: Fetch repository metadata to determine the default branch name
+        parameters:
+          - reference: $components.parameters.owner
+          - reference: $components.parameters.repo
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          defaultBranch: $response.body.default_branch
+
+      # ── B2: resolve default branch ref ──
+      - stepId: getDefaultBranchRef
+        operationId: git/get-ref
+        description: Get the HEAD SHA of the default branch
+        parameters:
+          - reference: $components.parameters.owner
+          - reference: $components.parameters.repo
+          - name: ref
+            in: path
+            value: heads/$steps.getRepo.outputs.defaultBranch
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          defaultBranchSha: $response.body.object.sha
+
+      # ── B3: create new branch ref from default branch ──
+      - stepId: createBranchRef
+        operationId: git/create-ref
+        description: Create the target branch pointing to the default branch HEAD
+        parameters:
+          - reference: $components.parameters.owner
+          - reference: $components.parameters.repo
+        requestBody:
+          contentType: application/json
+          payload:
+            ref: refs/heads/$inputs.branch
+            sha: $steps.getDefaultBranchRef.outputs.defaultBranchSha
+        successCriteria:
+          - condition: $statusCode == 201
+        outputs:
+          parentCommitSha: $response.body.object.sha
+
+      # ── B4: delegate to shared commit-and-push workflow ──
+      - stepId: commitAndPush
+        workflowId: commitAndPush
+        description: >
+          Commit and push the files using the newly created branch as parent.
+        parameters:
+          - name: owner
+            value: $inputs.owner
+          - name: repo
+            value: $inputs.repo
+          - name: branch
+            value: $inputs.branch
+          - name: commitMessage
+            value: $inputs.commitMessage
+          - name: files
+            value: $inputs.files
+          - name: parentCommitSha
+            value: $steps.createBranchRef.outputs.parentCommitSha
+        successCriteria:
+          - condition: $statusCode == 200
+        outputs:
+          ref: $outputs.ref
+          commitSha: $outputs.commitSha
+    outputs:
+      ref: $steps.commitAndPush.outputs.ref
+      commitSha: $steps.commitAndPush.outputs.commitSha
+
+  # ──────────────────────────────────────────────
+  # Shared workflow: commit and push
+  # ──────────────────────────────────────────────
+  - workflowId: commitAndPush
+    summary: Create a commit from files and update the branch ref
+    description: >
+      Shared workflow that performs the 4 Git Data API steps common to
+      both Path A and Path B: getParentCommit -> createTree ->
+      createCommit -> updateBranchRef.  Receives the parentCommitSha
+      as input so the caller controls which commit to build on.
+    inputs:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Repository owner
+        repo:
+          type: string
+          description: Repository name
+        branch:
+          type: string
+          description: Target branch name
+        commitMessage:
+          type: string
+          description: Commit message
+        files:
+          type: array
+          description: "Files to push (each entry: path + content)"
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              content:
+                type: string
+        parentCommitSha:
+          type: string
+          description: SHA of the parent commit to build upon
+      required:
+        - owner
+        - repo
+        - branch
+        - commitMessage
+        - files
+        - parentCommitSha
+    steps:
+      # ── C1: get parent commit ──
+      - stepId: getParentCommit
+        operationId: git/get-commit
+        description: Get the parent commit to retrieve its base tree SHA
+        parameters:
+          - reference: $components.parameters.owner
+          - reference: $components.parameters.repo
           - name: commit_sha
             in: path
-            value: $steps.getBranchRef.outputs.parentCommitSha
+            value: $inputs.parentCommitSha
         successCriteria:
           - condition: $statusCode == 200
         outputs:
           baseTreeSha: $response.body.tree.sha
 
+      # ── C2: create tree ──
       - stepId: createTree
         operationId: git/create-tree
         description: >
@@ -95,12 +306,8 @@ workflows:
           Files are passed inline via the content field — the API creates
           blobs internally, so no separate blob-creation step is needed.
         parameters:
-          - name: owner
-            in: path
-            value: $inputs.owner
-          - name: repo
-            in: path
-            value: $inputs.repo
+          - reference: $components.parameters.owner
+          - reference: $components.parameters.repo
         requestBody:
           contentType: application/json
           payload:
@@ -111,38 +318,32 @@ workflows:
         outputs:
           newTreeSha: $response.body.sha
 
+      # ── C3: create commit ──
       - stepId: createCommit
         operationId: git/create-commit
         description: Create a new commit pointing to the new tree
         parameters:
-          - name: owner
-            in: path
-            value: $inputs.owner
-          - name: repo
-            in: path
-            value: $inputs.repo
+          - reference: $components.parameters.owner
+          - reference: $components.parameters.repo
         requestBody:
           contentType: application/json
           payload:
             message: $inputs.commitMessage
             tree: $steps.createTree.outputs.newTreeSha
             parents:
-              - $steps.getBranchRef.outputs.parentCommitSha
+              - $inputs.parentCommitSha
         successCriteria:
           - condition: $statusCode == 201
         outputs:
           newCommitSha: $response.body.sha
 
+      # ── C4: update branch ref ──
       - stepId: updateBranchRef
         operationId: git/update-ref
         description: Fast-forward the branch ref to the new commit
         parameters:
-          - name: owner
-            in: path
-            value: $inputs.owner
-          - name: repo
-            in: path
-            value: $inputs.repo
+          - reference: $components.parameters.owner
+          - reference: $components.parameters.repo
           - name: ref
             in: path
             value: heads/$inputs.branch
