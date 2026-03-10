@@ -1,17 +1,14 @@
 arazzo: "1.0.1"
 info:
   title: "Push files to a GitHub repository"
-  summary: "Git Data API workflow that commits and pushes files, creating the branch if needed"
+  summary: "Commit and push files to a GitHub repository branch"
   version: "3.0.0"
   description: >
+    Describes the MCP tool `push_files` workflow using the Git Data API.
     Pushes one or more files to a branch in a GitHub repository.
-    Reproduces the MCP tool `push_files` as an Arazzo workflow covering
-    both Path A (branch exists) and Path B (branch not found / 404).
-    The shared commit-and-push logic (getParentCommit, createTree,
-    createCommit, updateBranchRef) is extracted into a reusable
-    `commitAndPush` workflow called by both paths.
-    File contents are passed inline in the tree entry — no separate
-    blob creation per file is needed.
+    If the target branch does not yet exist, it is automatically
+    created from the repository's default branch before the files
+    are committed.
 
 sourceDescriptions:
   - name: github-api
@@ -34,13 +31,10 @@ workflows:
   # Main workflow — entry point
   # ──────────────────────────────────────────────
   - workflowId: pushFiles
-    summary: Push files to a branch, creating it from the default branch if it does not exist
+    summary: Push files to a branch, creating it if it does not exist
     description: >
-      Tries to resolve the target branch ref (Path A).  If the branch does
-      not exist (404), delegates to the createBranchAndPushFiles workflow
-      which creates the branch from the repository default branch first
-      (Path B), then commits and pushes the files via the shared
-      commitAndPush workflow.
+      Pushes files to the target branch. If the branch does not exist,
+      it is created from the repository's default branch before committing.
     inputs:
       type: object
       properties:
@@ -77,9 +71,9 @@ workflows:
       - stepId: getBranchRef
         operationId: git/get-ref
         description: >
-          Resolve the current HEAD SHA of the target branch.
-          If the branch does not exist (404), fall through to Path B
-          which creates it from the default branch.
+          Resolve the current HEAD of the target branch.
+          If the branch does not exist, the workflow falls back to
+          creating it from the default branch.
         parameters:
           - reference: $components.parameters.owner
           - reference: $components.parameters.repo
@@ -100,8 +94,7 @@ workflows:
       # ── Step 2: delegate to shared commit-and-push workflow ──
       - stepId: commitAndPush
         workflowId: commitAndPush
-        description: >
-          Commit and push the files using the resolved branch HEAD as parent.
+        description: Commit the files and update the branch.
         parameters:
           - name: owner
             value: $inputs.owner
@@ -125,15 +118,14 @@ workflows:
       commitSha: $steps.commitAndPush.outputs.commitSha
 
   # ──────────────────────────────────────────────
-  # Path B: branch does not exist (404)
+  # Path B: branch does not exist
   # ──────────────────────────────────────────────
   - workflowId: createBranchAndPushFiles
-    summary: Create a new branch from the default branch, then push files
+    summary: Create a new branch from the default branch and push files to it
     description: >
-      Path B of the push_files tool.  Called when the target branch does
-      not exist.  Resolves the repository default branch, creates a new
-      branch ref from it, then delegates to the shared commitAndPush
-      workflow for the actual commit and push.
+      Handles the case where the target branch does not yet exist.
+      Determines the repository's default branch, creates the target
+      branch from it, then commits and pushes the files.
     inputs:
       type: object
       properties:
@@ -169,7 +161,7 @@ workflows:
       # ── B1: get repo to find default branch name ──
       - stepId: getRepo
         operationId: repos/get
-        description: Fetch repository metadata to determine the default branch name
+        description: Determine the repository's default branch name
         parameters:
           - reference: $components.parameters.owner
           - reference: $components.parameters.repo
@@ -181,7 +173,7 @@ workflows:
       # ── B2: resolve default branch ref ──
       - stepId: getDefaultBranchRef
         operationId: git/get-ref
-        description: Get the HEAD SHA of the default branch
+        description: Resolve the current HEAD of the default branch
         parameters:
           - reference: $components.parameters.owner
           - reference: $components.parameters.repo
@@ -196,7 +188,7 @@ workflows:
       # ── B3: create new branch ref from default branch ──
       - stepId: createBranchRef
         operationId: git/create-ref
-        description: Create the target branch pointing to the default branch HEAD
+        description: Create the target branch based on the default branch
         parameters:
           - reference: $components.parameters.owner
           - reference: $components.parameters.repo
@@ -213,8 +205,7 @@ workflows:
       # ── B4: delegate to shared commit-and-push workflow ──
       - stepId: commitAndPush
         workflowId: commitAndPush
-        description: >
-          Commit and push the files using the newly created branch as parent.
+        description: Commit the files and update the newly created branch.
         parameters:
           - name: owner
             value: $inputs.owner
@@ -241,12 +232,11 @@ workflows:
   # Shared workflow: commit and push
   # ──────────────────────────────────────────────
   - workflowId: commitAndPush
-    summary: Create a commit from files and update the branch ref
+    summary: Commit files and update the branch reference
     description: >
-      Shared workflow that performs the 4 Git Data API steps common to
-      both Path A and Path B: getParentCommit -> createTree ->
-      createCommit -> updateBranchRef.  Receives the parentCommitSha
-      as input so the caller controls which commit to build on.
+      Creates a Git commit containing the provided files and advances
+      the branch to point to the new commit. Expects the parent commit
+      to build upon as input.
     inputs:
       type: object
       properties:
@@ -286,7 +276,7 @@ workflows:
       # ── C1: get parent commit ──
       - stepId: getParentCommit
         operationId: git/get-commit
-        description: Get the parent commit to retrieve its base tree SHA
+        description: Retrieve the parent commit's tree as base for the new file tree
         parameters:
           - reference: $components.parameters.owner
           - reference: $components.parameters.repo
@@ -302,9 +292,8 @@ workflows:
       - stepId: createTree
         operationId: git/create-tree
         description: >
-          Create a new tree with the file contents.
-          Files are passed inline via the content field — the API creates
-          blobs internally, so no separate blob-creation step is needed.
+          Create a new file tree containing the provided files,
+          based on the parent commit's tree.
         parameters:
           - reference: $components.parameters.owner
           - reference: $components.parameters.repo
@@ -321,7 +310,7 @@ workflows:
       # ── C3: create commit ──
       - stepId: createCommit
         operationId: git/create-commit
-        description: Create a new commit pointing to the new tree
+        description: Create a commit with the new file tree and the given message
         parameters:
           - reference: $components.parameters.owner
           - reference: $components.parameters.repo
@@ -340,7 +329,7 @@ workflows:
       # ── C4: update branch ref ──
       - stepId: updateBranchRef
         operationId: git/update-ref
-        description: Fast-forward the branch ref to the new commit
+        description: Advance the branch to point to the new commit
         parameters:
           - reference: $components.parameters.owner
           - reference: $components.parameters.repo
